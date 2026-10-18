@@ -23,9 +23,76 @@ description: >-
 > [!NOTE]
 > `planner`、`generator`、`evaluator` は `.agents/agents/<name>/agent.md` に定義されており、Antigravity CLI によって自動的に認識されます。`invoke_subagent` ツールで `TypeName` にそれぞれ `planner` / `generator` / `evaluator` を指定して直接呼び出すことができます。
 
+```mermaid
+flowchart TD
+    User["ユーザー (User)"] -->|"開発タスクの依頼"| Orchestrator["親エージェント (Orchestrator)<br/>進行管理・ループ制御"]
+
+    subgraph Subagents ["独立コンテキスト Subagents (.agents/agents/)"]
+        Planner["Planner (計画担当)<br/>タスクチャンク分解・受入基準定義"]
+        Generator["Generator (実装担当)<br/>コード実装・単体テスト作成"]
+        Evaluator["Evaluator (評価・検証担当)<br/>静的監査・ビルド・テスト実行<br/>※コード編集禁止"]
+    end
+
+    subgraph Handoff ["構造化ハンドオフ (.agents/workspace/)"]
+        PlanMD["plan.md<br/>(計画・受入基準)"]
+        ProgressMD["progress.md<br/>(進捗・変更ファイル)"]
+        EvalMD["evaluation.md<br/>(合否判定・指摘事項)"]
+    end
+
+    Orchestrator -->|"1. 計画作成指示"| Planner
+    Planner -->|"出力"| PlanMD
+    Planner -->|"初期化"| ProgressMD
+
+    Orchestrator -->|"2. チャンク実装指示"| Generator
+    PlanMD -.->|"参照"| Generator
+    EvalMD -.->|"差し戻し時に参照"| Generator
+    Generator -->|"更新"| ProgressMD
+
+    Orchestrator -->|"3. 検証指示"| Evaluator
+    PlanMD -.->|"受入基準を参照"| Evaluator
+    ProgressMD -.->|"変更内容を参照"| Evaluator
+    Evaluator -->|"PASS / FAIL 出力"| EvalMD
+    EvalMD -.->|"4. 合否確認・ループ判定"| Orchestrator
+```
+
 ---
 
 ## 2. 実行手順（自律ループ）
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as ユーザー
+    participant Orch as Orchestrator (親)
+    participant Plan as Planner
+    participant Work as .agents/workspace/
+    participant Gen as Generator
+    participant Eval as Evaluator
+
+    User->>Orch: 機能開発・改修の依頼
+    Orch->>Plan: invoke_subagent("planner")
+    Plan->>Work: plan.md & progress.md を作成
+    Plan-->>Orch: 計画完了報告
+
+    loop 各タスクチャンク (Chunk 1..N)
+        loop Evaluator が PASS するまで (最大3回目安)
+            Orch->>Gen: invoke_subagent("generator", Chunk N)
+            Gen->>Work: plan.md / evaluation.md を読み込み
+            Gen->>Gen: コード実装 & 単体テスト作成 (client/ or server/)
+            Gen->>Work: progress.md を更新 (READY_FOR_EVAL)
+            Gen-->>Orch: 実装完了報告
+
+            Orch->>Eval: invoke_subagent("evaluator", Chunk N)
+            Eval->>Work: plan.md & progress.md を読み込み
+            Eval->>Eval: コード監査 & ビルド・テスト実行 (コード編集は一切行わない)
+            Eval->>Work: evaluation.md を出力 (PASS or FAIL)
+            Eval-->>Orch: 評価完了報告 (PASS / FAIL)
+        end
+        Orch->>Work: progress.md の Chunk N を COMPLETED に更新
+    end
+
+    Orch-->>User: 最終成果物と検証結果サマリーを報告
+```
 
 ### Phase 1: 計画フェーズ（Planner の起動）
 1. ユーザーから開発タスクを受け取ったら、まず要件に不明点がないか確認します（不明点があればユーザーに質問して解消します）。
